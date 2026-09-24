@@ -821,6 +821,98 @@ button.primary.export:hover { box-shadow: 0 4px 18px rgba(43, 182, 115, 0.35); }
 .pe-bad-text { color: #ff9c9c; }
 #btn-pe-download { width: 100%; margin: 10px 0 6px; }
 
+/* ---------- PNG 文件结构审计 ---------- */
+button.primary.audit {
+  background: linear-gradient(135deg, #3f8fb8, #2b6f93);
+  margin-top: 0;
+}
+button.primary.audit:hover { box-shadow: 0 4px 18px rgba(63, 158, 184, 0.35); }
+
+.audit-box { margin-top: 12px; }
+.audit-box h4 { margin: 12px 0 6px; font-size: 13px; color: var(--text, #e8ecf4); }
+#pa-issues { display: flex; flex-direction: column; gap: 6px; margin: 8px 0 4px; }
+.pa-issue {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  border-radius: 8px;
+  padding: 7px 10px;
+  word-break: break-all;
+}
+.pa-issue b { font-size: 12px; white-space: nowrap; }
+.pa-issue.severe {
+  color: #ffb3b3;
+  background: rgba(235, 70, 70, 0.08);
+  border: 1px solid rgba(235, 70, 70, 0.4);
+}
+.pa-issue.warn {
+  color: #ffd98a;
+  background: rgba(240, 170, 40, 0.08);
+  border: 1px solid rgba(240, 170, 40, 0.38);
+}
+.pa-off {
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  border-radius: 999px;
+  padding: 1px 8px;
+  background: rgba(255, 255, 255, 0.06);
+  white-space: nowrap;
+}
+.pa-msg { flex: 1 1 220px; }
+
+.pa-table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
+.pa-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.pa-table th {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+  text-align: left;
+  padding: 6px 10px;
+  white-space: nowrap;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--line);
+}
+.pa-table td {
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+.pa-table tbody tr:last-child td { border-bottom: none; }
+.pa-table td code {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-size: 11px;
+  color: #cfe0ff;
+}
+.pa-table tr.after-iend td {
+  background: rgba(240, 170, 40, 0.06);
+  color: var(--muted);
+}
+.pa-table tr.crc-bad { box-shadow: inset 3px 0 0 var(--bad); }
+.pa-range { color: #c5d0e2; }
+.pa-crc { font-weight: 600; white-space: nowrap; }
+.pa-crc.ok { color: #7ce8c8; }
+.pa-crc.bad { color: #ff9c9c; }
+.pa-flag {
+  font-size: 10px;
+  border-radius: 999px;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  vertical-align: 1px;
+}
+.pa-flag.bad { color: #ff9c9c; border-color: rgba(235, 70, 70, 0.5); }
+.pa-flag.after { color: #ffd98a; border-color: rgba(240, 170, 40, 0.5); }
+
 footer {
   text-align: center;
   color: #46536c;

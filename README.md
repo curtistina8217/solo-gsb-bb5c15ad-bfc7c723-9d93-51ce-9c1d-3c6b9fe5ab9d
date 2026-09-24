@@ -32,7 +32,8 @@ docker compose up -d --build
 - **API 基址**：`http://localhost:8000/api/`，例如
   健康检查 `GET http://localhost:8000/api/health`、
   隐私检查 `POST http://localhost:8000/api/privacy-check`、
-  导出隐私副本 `POST http://localhost:8000/api/privacy-export`
+  导出隐私副本 `POST http://localhost:8000/api/privacy-export`、
+  PNG 结构审计 `POST http://localhost:8000/api/png-audit`
   （Web 与 API **同一端口 8000**，无额外端口或容器；端口可在
   `docker-compose.yml` 的 `ports` 中改为如 `"8080:8000"`）
 - 启动入口：镜像 `CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0",
@@ -250,6 +251,83 @@ WM_DATA_DIR=./data uvicorn app.main:app --host 0.0.0.0 --port 8000
 `recheck`（无 `download`）；非 PNG/JPEG 或图片无法解码返回 **400**；
 摆正后超过 4096px 返回 **400**；超过 16MB 返回 **413**。
 
+### PNG 文件结构审计（逐块 / CRC / IEND 后尾随内容，只读）
+
+同一「图片隐私检查（EXIF）」区内还有 **🧬 PNG 文件结构审计** 按钮。上传任意字节
+（按内容审计，不依赖扩展名 / MIME），服务端严格按 **PNG 字节结构**而不是解码器
+结果进行解析：
+
+1. **签名**：核对偏移 0–7 是否为 `89 50 4E 47 0D 0A 1A 0A`；
+2. **逐块解析至 IEND**：每块按 **4 字节长度 → 4 字节类型 → 数据 → 4 字节
+   CRC32** 的顺序解析，页面表格逐块列出 **序号、类型、字节范围（半开区间
+   `[起, 止)`）、数据长度、CRC 是否正确**（悬停 CRC 可看文件记录值与实算值，
+   以及 CRC 所在偏移）；
+3. **IEND 之后的附加字节**：计算 IEND 结束块之后全部字节的 **长度与 SHA-256**，
+   用于发现常规图片预览看不到的尾随内容（例如转发平台附加的追踪串、隐写载荷、
+   拼接的第二个文件）；**没有尾随内容时明确显示「0 字节」**，不给出无意义摘要。
+   若尾随区本身是合法 chunk 序列，也会逐块列出并标记「IEND 后」，其中的第二个
+   IEND 报为重复 IEND；
+4. **异常给出偏移与明确结论**：块头截断（剩余不足 8 字节）、长度字段越界
+   （声明长度越过文件末尾或超过规范上限 2³¹−1）、缺少 IEND / 重复 IEND、
+   CRC 错误、非规范 chunk 类型、IHDR 非首块 / 缺少 IDAT 等，每一条都带 **字节
+   偏移**，顶部给出一句总体结论：`不是 PNG 文件` / `PNG 结构不完整：…` /
+   `PNG 数据流可解析至 IEND，但…`。**能被图片预览器正常打开不等于结构完整**：
+   例如解码器通常忽略 IEND 之后的字节，审计仍会判为有问题。
+
+审计**全程只在服务端内存中进行**：不保存上传文件、不创建水印任务、不改写任何
+数据与归档；现有的 EXIF 检查与隐私副本导出接口行为完全不变。上传限 **16MB**
+（超限 **413**，空文件 **400**）；非 PNG 字节返回 **200** +
+`signature_ok=false` 的结构化结论（不是报错），便于审计被改名 / 伪装的文件。
+
+对应接口：`POST /api/png-audit`（multipart：`image`，≤ 16MB）。
+
+```bash
+curl -s -X POST http://localhost:8000/api/png-audit \
+  -F "image=@suspect.png" | python3 -m json.tool
+```
+
+响应（节选）：
+
+```json
+{
+  "filename": "suspect.png",
+  "signature_ok": true,
+  "bytes": 12357,
+  "chunks": [
+    { "index": 0, "type": "IHDR", "offset": 8, "end_offset": 33,
+      "byte_range": [8, 33], "data_offset": 16, "data_length": 13,
+      "crc_offset": 29, "crc_stored": "0x9A76EEF9",
+      "crc_computed": "0x9A76EEF9", "crc_ok": true, "after_iend": false },
+    { "index": 1, "type": "IDAT", "offset": 33, "end_offset": 12345,
+      "byte_range": [33, 12345], "data_offset": 41, "data_length": 12292,
+      "crc_stored": "0x12345678", "crc_computed": "0x87654321",
+      "crc_ok": false, "after_iend": false },
+    { "index": 2, "type": "IEND", "offset": 12345, "end_offset": 12357,
+      "byte_range": [12345, 12357], "data_length": 0,
+      "crc_stored": "0xAE426082", "crc_computed": "0xAE426082",
+      "crc_ok": true, "after_iend": false }
+  ],
+  "chunk_count": 3,
+  "iend_found": true,
+  "iend_offset": 12345,
+  "iend_count": 1,
+  "trailing": { "offset": 12357, "bytes": 0, "sha256": null },
+  "issues": [
+    { "kind": "crc_mismatch", "offset": 12333,
+      "message": "chunk IDAT（数据偏移 41，长度 12292）CRC 校验失败：文件记录 0x12345678，按类型+数据实算 0x87654321。" }
+  ],
+  "issue_count": 1,
+  "ok": false,
+  "conclusion": "PNG 数据流可解析至 IEND，但1 个 chunk CRC 校验失败（首个在偏移 12333）。能被图片预览器正常显示不等于结构完整，请逐条核对下方问题。",
+  "stored": false
+}
+```
+
+> IEND 之后存在附加字节时 `trailing.bytes > 0`、`trailing.sha256` 为尾随字节的
+> SHA-256（起始偏移见 `trailing.offset`），同时 `issues` 含一条
+> `trailing_bytes`；无尾随内容时 `trailing = {"offset": N, "bytes": 0,
+> "sha256": null}`。
+
 ### 检测报告可验证归档
 
 检测结果面板内可**勾选一次或多次检测结果**生成规范化 JSON 检测报告（归档）：
@@ -398,6 +476,7 @@ WM_DATA_DIR=./data uvicorn app.main:app --host 0.0.0.0 --port 8000
 | POST | `/api/jobs/{id}/robustness-matrix` | JSON：`{"jpeg_qualities": [90,50,30], "crop_fractions": [1.0,0.75,0.5]}`（各 1–3 个、不可重复；质量 20–100、比例 0.30–1.00）。**只读**：从同一份含水印原图为每格独立「先裁切后压缩」再调用现有检测器，逐格返回恢复文本 / 与原文是否一致 / 置信度与同步指标，并给出只按实测成功格计算的 `boundary`（二维最严成功边界，不做相邻推断）；不写 `target.png`、不改攻击历史、不产生检测记录与归档 |
 | POST | `/api/privacy-check` | multipart：上传 PNG/JPEG `image`，**只读**解析 EXIF 拍摄时间、相机品牌/型号、GPS（带符号十进制度）；不落盘、不建任务，字段缺失为 `null`，EXIF 损坏返回 200 + `warnings` |
 | POST | `/api/privacy-export` | 导出隐私副本（multipart：PNG/JPEG `image`，≤16MB）：先按 EXIF Orientation（1–8）摆正像素，保留透明通道，再以全新 PNG 重编码（无 EXIF/GPS/XMP/ICC/PNG 文本）；**导出前重新解析生成文件做 chunk 扫描 + 再解析 + 像素无损复查**，通过返回 200、原图识别字段（拍摄时间/相机/GPS/方向）与 `recheck` 结果及内联 `download.data_url`，复查不过返回 **500 + `offenders`/`recheck` 且无下载数据**；摆正后超 4096px / 非 PNG·JPEG / 无法解码为 400，超 16MB 为 413；全程内存、不建任务 |
+| POST | `/api/png-audit` | PNG 文件结构审计（**只读**，multipart：`image`，≤16MB，按字节内容审计不依赖扩展名）：按签名 → 块长度 → 类型 → 数据 → CRC 逐块解析至 IEND，返回每块类型 / 字节范围 / 数据长度 / `crc_ok`，以及 IEND 之后附加字节的 `trailing.bytes` 与 `trailing.sha256`（无尾随内容时明确为 0 字节）；截断 / 越界长度 / 缺少或重复 IEND / CRC 错误等在 `issues` 中带偏移，`conclusion` 给出明确结论（能解码≠结构完整）；非 PNG 字节返回 200 + `signature_ok=false`；空文件 400、超 16MB 413；全程内存、不建任务、不改隐私导出 |
 | POST | `/api/jobs/{id}/locate` | 传播副本来源定位（**只读**，multipart：`image`）：以任务 `watermarked.png` 为参照，SIFT 特征匹配 + Lowe 比率 + RANSAC 单应估计上传图四角在参照图中的位置；内点数量 / 比例、投影四边形凸性 / 面积 / 边界、重投影误差全部通过时返回 `located=true`、`quad` 四角坐标、`coverage` 覆盖率与内联 JPEG `preview_data_url`；否则 **200 + `located=false`** 与 `reason` / `failed_check`，不返回伪位置。不写任务文件、不产生检测记录与归档；任务不存在 / upload_only 轻量任务返回 404 |
 | GET | `/api/jobs/{id}/{kind}` | 下载 `original` / `watermarked` / `target` / `marked` PNG |
 | GET | `/api/jobs/{id}/detections/{det_id}/{kind}` | 下载某次检测的 `source`（检测输入快照）/ `marked`（标注图）PNG |
@@ -704,10 +783,11 @@ compose 默认把数据目录持久化到命名卷 `wm-data`；归档报告与�
 │   ├── provenance.py     # 传播副本来源定位（只读）：SIFT 特征 + Lowe 比率 + RANSAC 单应 / 四角·覆盖率·标注预览 / 几何门限不通过则明确「无法定位」
 │   ├── exifcheck.py      # 图片隐私检查：只读解析 EXIF 拍摄时间 / 相机 / GPS（损坏不阻断、不落盘）
 │   ├── privacy_export.py # 导出隐私副本：EXIF Orientation 摆正像素 / 保留透明通道全新 PNG 重编码 / 导出前重新解析复查（全内存、不建任务）
+│   ├── pngaudit.py       # PNG 结构审计（只读）：签名 + 逐块 长度/类型/数据/CRC 解析至 IEND / IEND 后尾随字节长度与 SHA-256 / 截断·越界·IEND·CRC 异常带偏移结论（全内存、不建任务）
 │   ├── archive.py        # 检测报告：规范化 JSON / SHA-256 清单 / 仅追加哈希链归档 / 校验
-│   ├── main.py           # FastAPI：任务存储、手动/自动嵌入、攻击/检测/鲁棒性矩阵/来源定位/隐私检查/隐私副本导出/报告接口、静态资源
+│   ├── main.py           # FastAPI：任务存储、手动/自动嵌入、攻击/检测/鲁棒性矩阵/来源定位/隐私检查/隐私副本导出/PNG 结构审计/报告接口、静态资源
 │   └── static/
-│       ├── index.html    # 单页界面（嵌入含手动/自动选强度 / 攻击 / 鲁棒性矩阵 / 来源定位 / 检测 / 隐私检查与隐私副本导出 / 归档）
+│       ├── index.html    # 单页界面（嵌入含手动/自动选强度 / 攻击 / 鲁棒性矩阵 / 来源定位 / 检测 / 隐私检查与隐私副本导出 / PNG 结构审计 / 归档）
 │       ├── style.css
 │       └── app.js
 ├── tests/
@@ -718,6 +798,7 @@ compose 默认把数据目录持久化到命名卷 `wm-data`；归档报告与�
 │   ├── test_provenance.py  # 传播副本来源定位：四角精度（裁切/缩放/转存）/ 无关图·平坦图拒绝 / 几何门限 / 只读不改写 / 接口
 │   ├── test_privacy.py   # 隐私检查接口：EXIF 解析 / DMS 还原 / 缺失与损坏 / 不落盘不阻断
 │   ├── test_privacy_export.py # 隐私副本导出：8 方向摆正 / 元数据清除 / 透明通道 / 复查与拒绝下载 / 不落盘不建任务
+│   ├── test_pngaudit.py  # PNG 结构审计：逐块范围与 CRC / 尾随字节长度与 SHA-256 / 截断·越界·缺重 IEND·CRC 篡改 / 非 PNG / 不落盘不建任务
 │   └── test_reports.py   # 报告归档接口与清单/哈希链校验（篡改、缺失、断链）
 ├── requirements.txt
 ├── Dockerfile
@@ -729,7 +810,7 @@ compose 默认把数据目录持久化到命名卷 `wm-data`；归档报告与�
 
 ```bash
 python3 tests/test_core.py
-python3 -m pytest tests/ -q   # 归档 + 隐私检查 + 隐私副本导出 + 方向检索接口测试
+python3 -m pytest tests/ -q   # 归档 + 隐私检查 + 隐私副本导出 + PNG 结构审计 + 方向检索接口测试
 ```
 
 数据目录布局（`WM_DATA_DIR`）：
@@ -763,4 +844,8 @@ archive.log.jsonl                     # 仅追加归档记录（哈希链）
 - **传播副本来源定位同样为纯只读操作**：上传副本与参照图都只在内存中参与特征匹配，
   不写任务文件（`meta.json` / `target.png` 等）、不产生检测记录与归档；
   几何门限任一不通过时只返回「无法定位」及原因，绝不返回推测性坐标。
+- **PNG 文件结构审计同样为纯只读操作**：上传字节只在内存中按 PNG 结构逐块解析，
+  不写盘、不建任务、不影响归档；结构结论只依据字节级解析（签名 / 块长度 / 类型 /
+  数据 / CRC / IEND / 尾随字节），与解码器能否打开图片无关——能预览不代表结构完整，
+  IEND 之后的附加字节会以长度 + SHA-256 明确标出，没有尾随内容时明确为 0 字节。
 - 数字水印的鲁棒性是概率性的，标注图与置信度用于辅助判断，不构成版权存证保证。

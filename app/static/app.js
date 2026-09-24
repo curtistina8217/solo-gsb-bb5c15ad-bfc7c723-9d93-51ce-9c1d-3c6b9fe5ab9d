@@ -1135,6 +1135,109 @@ function downloadName(filename) {
   return (base || "privacy") + ".privacy.png";
 }
 
+/* ---------------- PNG 文件结构审计（逐块 / CRC / IEND 后尾随，只读不落盘） ---------------- */
+
+const PA_KIND_LABELS = {
+  bad_signature: "PNG 签名不匹配",
+  truncated_chunk_header: "块头截断",
+  length_out_of_bounds: "块长度越界",
+  invalid_chunk_type: "块类型不规范",
+  crc_mismatch: "CRC 校验错误",
+  missing_iend: "缺少 IEND",
+  duplicate_iend: "重复 IEND",
+  ihdr_not_first: "IHDR 不是首块",
+  missing_ihdr: "缺少 IHDR",
+  missing_idat: "缺少 IDAT",
+  trailing_bytes: "IEND 后附加字节",
+};
+
+$("#btn-png-audit").addEventListener("click", async () => {
+  const file = $("#privacy-file").files[0];
+  const status = $("#privacy-status");
+  if (!file) return fail(status, "请先选择一张待审计的 PNG 图片。");
+
+  // 按字节内容审计，不依赖扩展名 / MIME：即使扩展名不是 .png 也照常上传，
+  // 签名不匹配时由服务端给出结构化结论。
+  const fd = new FormData();
+  fd.append("image", file);
+  busy(status, "正在按 签名 → 长度 → 类型 → 数据 → CRC 顺序逐块解析 PNG…");
+  $("#png-audit-result").classList.add("hidden");
+  try {
+    const r = await api("/api/png-audit", { method: "POST", body: fd });
+    renderPngAudit(r);
+    ok(status, r.ok
+      ? "结构审计完成：结构完整，IEND 之后 0 字节附加数据（文件与结果均未保存）。"
+      : "结构审计完成：发现结构问题，详见下方逐条结论（文件与结果均未保存）。");
+  } catch (err) {
+    fail(status, err.message);
+  }
+});
+
+function renderPngAudit(r) {
+  const box = $("#png-audit-result");
+  box.classList.remove("hidden");
+
+  const verdict = $("#pa-verdict");
+  verdict.className = "pe-verdict " + (r.ok ? "ok" : "fail");
+  verdict.textContent = (r.ok ? "✔ " : "✘ ") + (r.conclusion || "审计完成。");
+
+  $("#pa-size").textContent = `${r.bytes.toLocaleString()} 字节（${formatBytes(r.bytes)}）`;
+  $("#pa-sig").innerHTML = r.signature_ok
+    ? '<span class="pe-ok-text">✔ 匹配（89 50 4E 47 0D 0A 1A 0A）</span>'
+    : '<span class="pe-bad-text">✘ 不匹配</span>';
+  $("#pa-iend").textContent = r.iend_found
+    ? `${r.chunk_count} 个 chunk · IEND 位于偏移 ${r.iend_offset}` +
+      (r.iend_count > 1 ? ` · 共出现 ${r.iend_count} 次` : "")
+    : `${r.chunk_count} 个 chunk · 未找到 IEND`;
+
+  const t = r.trailing || {};
+  $("#pa-trailing").innerHTML = (t.bytes || 0) > 0
+    ? `<span class="pe-bad-text">${t.bytes.toLocaleString()} 字节` +
+      `（偏移 ${t.offset} 起，预览不可见）</span>`
+    : '<span class="pe-ok-text">0 字节（IEND 之后无附加内容）</span>';
+  $("#pa-sha").innerHTML = t.sha256
+    ? `<small>${escapeHtml(t.sha256)}</small>`
+    : "—";
+
+  const issuesBox = $("#pa-issues");
+  issuesBox.innerHTML = "";
+  (r.issues || []).forEach((it) => {
+    const div = document.createElement("div");
+    const severe = ["bad_signature", "truncated_chunk_header", "length_out_of_bounds",
+      "missing_iend", "crc_mismatch", "duplicate_iend"].includes(it.kind);
+    div.className = "pa-issue " + (severe ? "severe" : "warn");
+    div.innerHTML =
+      `<b>${escapeHtml(PA_KIND_LABELS[it.kind] || it.kind)}</b>` +
+      `<span class="pa-off">偏移 ${it.offset}</span>` +
+      `<span class="pa-msg">${escapeHtml(it.message)}</span>`;
+    issuesBox.appendChild(div);
+  });
+
+  const tbl = $("#pa-table");
+  if (!r.chunks || !r.chunks.length) {
+    tbl.innerHTML = "";
+    return;
+  }
+  const head =
+    `<thead><tr><th>#</th><th>类型</th><th>字节范围 [起, 止)</th><th>数据长度</th><th>CRC</th></tr></thead>`;
+  const rows = r.chunks.map((c) => {
+    const crcCell = c.crc_ok
+      ? `<span class="pa-crc ok" title="文件记录 ${escapeHtml(c.crc_stored)} = 实算 ${escapeHtml(c.crc_computed)}（CRC 位于偏移 ${c.crc_offset}）">✔ 正确</span>`
+      : `<span class="pa-crc bad" title="文件记录 ${escapeHtml(c.crc_stored)} ≠ 实算 ${escapeHtml(c.crc_computed)}（CRC 位于偏移 ${c.crc_offset}）">✘ 错误</span>`;
+    const flags =
+      (c.type_valid ? "" : ' <span class="pa-flag bad">非规范</span>') +
+      (c.after_iend ? ' <span class="pa-flag after">IEND 后</span>' : "");
+    return `<tr class="${c.after_iend ? "after-iend" : ""}${c.crc_ok ? "" : " crc-bad"}">
+      <td>${c.index}</td>
+      <td><code>${escapeHtml(c.type)}</code>${flags}</td>
+      <td class="pa-range">${c.offset.toLocaleString()} – ${c.end_offset.toLocaleString()}</td>
+      <td>${c.data_length.toLocaleString()} 字节</td>
+      <td>${crcCell}</td>
+    </tr>`;
+  }).join("");
+  tbl.innerHTML = head + `<tbody>${rows}</tbody>`;
+}
+
 function formatBytes(n) {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;

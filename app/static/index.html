@@ -239,6 +239,7 @@
         <button class="primary privacy" id="btn-privacy">检查图片隐私信息</button>
         <button class="primary export" id="btn-privacy-export">导出隐私副本</button>
       </div>
+      <button class="primary audit" id="btn-png-audit">🧬 PNG 文件结构审计（逐块 / CRC / IEND 后尾随内容）</button>
       <div class="status" id="privacy-status"></div>
 
       <div id="privacy-result" class="privacy-box hidden">
@@ -282,6 +283,28 @@
         <small class="muted">
           导出全程仅在服务端内存中完成：已按 EXIF Orientation 摆正像素并以全新 PNG 重编码，
           不含 EXIF、GPS、XMP、ICC 及 PNG 文本元数据；不创建水印任务、不改写任何数据。
+        </small>
+      </div>
+
+      <div id="png-audit-result" class="privacy-box audit-box hidden">
+        <div id="pa-verdict" class="pe-verdict"></div>
+        <dl class="privacy-dl">
+          <dt>文件大小</dt><dd id="pa-size">—</dd>
+          <dt>PNG 签名（偏移 0–7）</dt><dd id="pa-sig">—</dd>
+          <dt>chunk 数 / IEND</dt><dd id="pa-iend">—</dd>
+          <dt>IEND 后附加字节</dt><dd id="pa-trailing">—</dd>
+          <dt>尾随内容 SHA-256</dt><dd id="pa-sha">—</dd>
+        </dl>
+        <div id="pa-issues"></div>
+
+        <h4>逐块解析（长度 → 类型 → 数据 → CRC，字节范围为半开区间 [起, 止)）</h4>
+        <div class="pa-table-wrap">
+          <table class="pa-table" id="pa-table"></table>
+        </div>
+        <small class="muted">
+          审计全程在服务端内存中完成：不保存文件、不创建任务、不改现有隐私导出。
+          结构结论只依据字节级解析——即使图片预览正常、能被解码器打开，CRC 错误、
+          截断或 IEND 之后的附加字节仍会逐一标出；没有尾随内容时明确显示 0 字节。
         </small>
       </div>
     </section>
