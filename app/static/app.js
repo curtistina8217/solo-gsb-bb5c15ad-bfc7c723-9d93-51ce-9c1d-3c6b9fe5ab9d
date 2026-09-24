@@ -1135,6 +1135,137 @@ function downloadName(filename) {
   return (base || "privacy") + ".privacy.png";
 }
 
+/* ---------------- PNG 结构审计（逐块解析 / CRC / 尾随内容，只读不落盘） ---------------- */
+
+$("#btn-png-audit").addEventListener("click", async () => {
+  const file = $("#privacy-file").files[0];
+  const status = $("#privacy-status");
+  if (!file) return fail(status, "请先选择一张 PNG 图片。");
+  if (!/^image\/png$/i.test(file.type)) {
+    return fail(status, "PNG 结构审计仅支持 PNG 图片（EXIF 检查 / 隐私副本支持 PNG 或 JPEG）。");
+  }
+
+  const fd = new FormData();
+  fd.append("image", file);
+  busy(status, "正在按签名 → 长度 → 类型 → 数据 → CRC 逐块解析 PNG 结构…");
+  $("#png-audit-result").classList.add("hidden");
+  try {
+    const r = await api("/api/png-audit", { method: "POST", body: fd });
+    renderPngAudit(r);
+    if (r.structurally_valid) {
+      ok(status, r.trailing && r.trailing.length > 0
+        ? "结构完整，但发现 IEND 之后的附加字节（见审计结果）。"
+        : "结构完整，IEND 之后无附加字节（0 字节）。");
+    } else {
+      fail(status, `PNG 结构存在 ${(r.errors || []).length} 个问题，详见审计结果。`);
+    }
+  } catch (err) {
+    fail(status, err.message);
+  }
+});
+
+function renderPngAudit(r) {
+  const box = $("#png-audit-result");
+  box.classList.remove("hidden");
+
+  const hasTrailing = !!(r.trailing && r.trailing.length > 0);
+  const verdict = $("#pa-verdict");
+  verdict.className = "pe-verdict " + (r.structurally_valid
+    ? (hasTrailing ? "warn" : "ok") : "fail");
+  verdict.textContent = (r.structurally_valid ? "✔ " : "✘ ") + r.conclusion;
+
+  // 错误（带偏移）
+  const errBox = $("#pa-errors");
+  errBox.innerHTML = "";
+  (r.errors || []).forEach((e) => {
+    const div = document.createElement("div");
+    div.className = "pa-error";
+    const off = e.offset === null || e.offset === undefined ? "" : ` <code>@${e.offset}</code>`;
+    div.innerHTML = "✘ [" + escapeHtml(e.code) + "]" + off + " " + escapeHtml(e.message);
+    errBox.appendChild(div);
+  });
+
+  // 警告（嵌入 PNG 签名等）
+  const warnBox = $("#pa-warnings");
+  warnBox.innerHTML = "";
+  (r.warnings || []).forEach((w) => {
+    const div = document.createElement("div");
+    div.className = "privacy-warn";
+    const off = w.offset === null || w.offset === undefined ? "" : `（偏移 ${w.offset}）`;
+    div.textContent = "⚠ [" + w.code + "] " + w.message + off;
+    warnBox.appendChild(div);
+  });
+
+  $("#pa-signature").innerHTML = r.signature_ok
+    ? '<span class="pe-ok-text">✔ 89 50 4E 47 0D 0A 1A 0A</span>'
+    : '<span class="pe-bad-text">✘ 签名不匹配</span>';
+  $("#pa-valid").innerHTML = r.structurally_valid
+    ? '<span class="pe-ok-text">结构完整</span>'
+    : '<span class="pe-bad-text">结构不完整 / 不合法</span>';
+  if (r.decodable) {
+    $("#pa-decodable").innerHTML =
+      `可以解码（${escapeHtml(r.decode_format || "PNG")}）` +
+      (r.structurally_valid ? "" : ' <small class="pa-note">能解码 ≠ 结构完整</small>');
+  } else {
+    $("#pa-decodable").innerHTML =
+      `<span class="pe-bad-text">无法解码</span><small>${escapeHtml(r.decode_error || "")}</small>`;
+  }
+  $("#pa-bytes").textContent = formatBytes(r.bytes) + `（${r.bytes} 字节）`;
+  $("#pa-chunk-count").textContent = `${r.chunk_count} 个块 · CRC 错误 ${r.crc_error_count} 个`;
+
+  const ie = r.iend || {};
+  $("#pa-iend").innerHTML = ie.present
+    ? `偏移 ${ie.offset}–${ie.end} · 数据长度 ${ie.data_length}` +
+      (ie.crc_valid === false ? ' · <span class="pe-bad-text">CRC 错误</span>'
+                              : ' · <span class="pe-ok-text">CRC 正确</span>')
+    : '<span class="pe-bad-text">缺少 IEND</span>';
+
+  // 逐块明细表
+  const tbody = $("#pa-table tbody");
+  tbody.innerHTML = "";
+  (r.chunks || []).forEach((c) => {
+    const tr = document.createElement("tr");
+    if (!c.complete || c.crc_valid === false || !c.type_valid) tr.className = "row-bad";
+    const name = c.type_valid
+      ? escapeHtml(c.type)
+      : `<span class="pe-bad-text">非法类型 ${escapeHtml(c.type_hex)}</span>`;
+    const crc = c.crc_valid === null
+      ? '<span class="muted">无法校验（截断）</span>'
+      : c.crc_valid
+        ? '<span class="pe-ok-text">✔ 正确</span>'
+        : '<span class="pe-bad-text">✘ 错误</span>';
+    tr.innerHTML =
+      `<td>${c.index}</td>` +
+      `<td class="pa-type">${name}</td>` +
+      `<td>${c.offset}–${c.end}</td>` +
+      `<td>${c.data_range[0]}–${c.data_range[1]}</td>` +
+      `<td>${c.data_length}</td>` +
+      `<td>${crc}</td>`;
+    tbody.appendChild(tr);
+  });
+
+  // IEND 之后附加字节
+  const t = r.trailing;
+  const tBox = $("#pa-trailing");
+  if (!t) {
+    tBox.innerHTML = '<span class="muted">未解析到 IEND，无法界定尾随内容。</span>';
+  } else if (t.length === 0) {
+    tBox.innerHTML =
+      '<div class="pa-trail ok">✔ IEND 之后附加字节：<b>0 字节</b>，无尾随内容。</div>';
+  } else {
+    tBox.innerHTML =
+      `<div class="pa-trail bad">⚠ IEND 之后存在 <b>${t.length}</b> 字节附加内容` +
+      `（起始偏移 ${t.offset}），常规图片预览看不到，解码器通常忽略。</div>` +
+      `<dl class="privacy-dl">
+         <dt>长度</dt><dd>${t.length} 字节（${formatBytes(t.length)}）</dd>
+         <dt>起始偏移</dt><dd>${t.offset}</dd>
+         <dt>SHA-256</dt><dd><small>${escapeHtml(t.sha256)}</small></dd>
+         <dt>前 32 字节(HEX)</dt><dd><small>${escapeHtml(t.preview_hex || "")}${t.preview_truncated ? " …" : ""}</small></dd>
+         <dt>前 32 字节(ASCII)</dt><dd><small>${escapeHtml(t.preview_ascii || "")}</small></dd>
+       </dl>`;
+  }
+}
+
 function formatBytes(n) {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;

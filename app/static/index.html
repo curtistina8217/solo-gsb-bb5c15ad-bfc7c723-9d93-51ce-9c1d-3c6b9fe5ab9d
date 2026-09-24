@@ -230,6 +230,9 @@
         上传 <b>PNG / JPEG</b> 照片，解析 EXIF 中的<b>拍摄时间</b>、<b>相机品牌 / 型号</b>与
         <b>GPS 经纬度</b>（度分秒按 N/S、E/W 还原为带符号十进制度）。
         检查在内存中完成，<b>不保存图片或元数据、不创建任务</b>，结果仅返回给本次请求。
+        同区「<b>PNG 结构审计</b>」对 PNG 做逐块字节级解析（长度 / 类型 / CRC 至 IEND），
+        专门发现常规预览看不到的 <b>IEND 后尾随内容</b>，并报告截断、越界长度、
+        缺少 / 重复 IEND 与 CRC 错误。
       </p>
       <label class="field">
         <span>待检查图片（仅 PNG / JPEG）</span>
@@ -238,6 +241,7 @@
       <div class="btn-row privacy-btns">
         <button class="primary privacy" id="btn-privacy">检查图片隐私信息</button>
         <button class="primary export" id="btn-privacy-export">导出隐私副本</button>
+        <button class="primary audit" id="btn-png-audit">PNG 结构审计</button>
       </div>
       <div class="status" id="privacy-status"></div>
 
@@ -282,6 +286,45 @@
         <small class="muted">
           导出全程仅在服务端内存中完成：已按 EXIF Orientation 摆正像素并以全新 PNG 重编码，
           不含 EXIF、GPS、XMP、ICC 及 PNG 文本元数据；不创建水印任务、不改写任何数据。
+        </small>
+      </div>
+
+      <div id="png-audit-result" class="privacy-box audit-box hidden">
+        <div id="pa-verdict" class="pe-verdict"></div>
+        <div id="pa-errors" class="pa-errors"></div>
+        <div id="pa-warnings" class="pa-warnings"></div>
+
+        <h4>审计概要</h4>
+        <dl class="privacy-dl">
+          <dt>PNG 签名</dt><dd id="pa-signature">—</dd>
+          <dt>结构结论</dt><dd id="pa-valid">—</dd>
+          <dt>能否常规解码</dt><dd id="pa-decodable">—</dd>
+          <dt>文件大小</dt><dd id="pa-bytes">—</dd>
+          <dt>块数量 / CRC 错误</dt><dd id="pa-chunk-count">—</dd>
+          <dt>IEND</dt><dd id="pa-iend">—</dd>
+        </dl>
+        <p class="muted pa-conclusion-note">
+          结构审计按 <code>签名 → 长度 → 类型 → 数据 → CRC</code> 逐块解析；
+          <b>能被图片预览器解码 ≠ 结构完整</b>。
+        </p>
+
+        <h4>逐块明细（类型 / 字节范围 / 数据长度 / CRC）</h4>
+        <div class="pa-table-wrap">
+          <table class="pa-table" id="pa-table">
+            <thead>
+              <tr>
+                <th>#</th><th>类型</th><th>字节范围</th>
+                <th>数据偏移</th><th>数据长度</th><th>CRC</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <h4>IEND 之后的附加字节</h4>
+        <div id="pa-trailing" class="pa-trailing"></div>
+        <small class="muted">
+          审计全程在服务端内存中完成，不保存上传字节、不创建水印任务，也不改变隐私副本导出。
         </small>
       </div>
     </section>

@@ -25,6 +25,11 @@
                           （清除 EXIF/GPS/XMP/ICC/PNG 文本，保留透明通道），导出前
                           重新解析生成文件复查；复查不通过返回错误且不提供下载。
                           全程内存，不创建/改写任何水印任务
+  POST /api/png-audit     上传 PNG -> 只读字节级结构审计：签名 / 逐块长度·类型·CRC
+                          解析至 IEND，给出每块类型、字节范围、数据长度、CRC 结论，
+                          并报告 IEND 之后附加字节长度与 SHA-256；截断、越界长度、
+                          缺少/重复 IEND、CRC 错误均给出偏移与明确结论，能解码不等于
+                          结构完整。全程内存，不落盘、不建任务、不影响隐私导出
   GET  /api/jobs/{id}/{kind}  任务文件下载（original/watermarked/target/marked）
   GET  /api/jobs/{id}/detections/{det_id}/{kind}  某次检测的输入快照 / 标注图
   POST /api/jobs/{id}/reports   选择一次或多次检测 -> 可验证 JSON 报告并追加归档
@@ -48,7 +53,7 @@ from PIL import Image
 from pydantic import BaseModel
 
 from . import archive, autostrength, dctwm as wm
-from . import exifcheck, matrix, orientation, privacy_export, provenance
+from . import exifcheck, matrix, orientation, pngaudit, privacy_export, provenance
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -58,7 +63,7 @@ MAX_UPLOAD_BYTES = 16 * 1024 * 1024
 MAX_DIM = 4096
 ALLOWED_KINDS = {"original", "watermarked", "target", "marked"}
 
-app = FastAPI(title="抗裁切水印实验台", version="1.6.0")
+app = FastAPI(title="抗裁切水印实验台", version="1.7.0")
 
 
 # ---------------------------------------------------------------- 任务存储
@@ -637,6 +642,37 @@ async def export_privacy(image: UploadFile = File(...)):
             },
         )
     return JSONResponse({"filename": image.filename, **result})
+
+
+@app.post("/api/png-audit")
+async def png_audit(image: UploadFile = File(...)):
+    """PNG 文件结构审计（只读、全内存）。
+
+    按 签名 → 块长度 → 类型 → 数据 → CRC 的顺序逐块解析至 IEND，
+    逐块列出类型、字节范围、数据长度与 CRC 是否正确，并专门报告
+    IEND 之后附加字节的长度与 SHA-256；截断 / 越界长度 / 缺少或
+    重复 IEND / CRC 错误都返回 200 + 带偏移的明确结论
+    （structurally_valid=false），不把能解码当成结构完整。
+
+    不落盘、不建任务、不触碰水印任务、攻击记录、报告归档与隐私导出；
+    结果仅随本次响应返回。仅接受 PNG（按签名判定），非 PNG / 空文件
+    返回 400，超过 16MB 返回 413。
+    """
+    data = await image.read(MAX_UPLOAD_BYTES + 1)
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="图片不能超过 16MB。")
+    if not data:
+        raise HTTPException(status_code=400, detail="上传内容为空。")
+    try:
+        result = pngaudit.audit_png(data)
+    except pngaudit.PngAuditError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return JSONResponse({
+        "filename": image.filename,
+        "content_type": image.content_type,
+        **result,
+        "stored": False,
+    })
 
 
 @app.get("/api/jobs/{job_id}/{kind}")
